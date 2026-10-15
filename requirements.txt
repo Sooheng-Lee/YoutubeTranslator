@@ -1,0 +1,14 @@
+PyQt6>=6.7,<7
+faster-whisper>=1.2,<2
+transformers>=4.57,<5
+accelerate>=1.10,<2
+bitsandbytes>=0.48,<1
+yt-dlp[default]>=2026.1
+imageio-ffmpeg>=0.6,<1
+sentencepiece>=0.2,<1
+protobuf>=5,<7
+platformdirs>=4,<5
+pysubs2>=1.8,<2
+pytest>=8,<10
+psutil>=7,<8
+hf-xet>=1.2,<2

@@ -1,0 +1,1 @@
+"""YouTube Translator desktop application."""
