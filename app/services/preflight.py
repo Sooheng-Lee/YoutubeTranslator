@@ -20,7 +20,7 @@ class TranslationPreflight:
         cancellation.check()
         if not settings.model_path.strip():
             raise PreparationError("LLM ID Path를 입력하세요.")
-        if settings.device not in {"cpu", "cuda"} or settings.precision not in {"4bit", "float16", "float32"}:
+        if settings.device not in {"cpu", "cuda"} or settings.precision not in {"4bit", "bfloat16", "float16", "float32"}:
             raise PreparationError("실행 장치와 정밀도 설정을 확인하세요.")
         if settings.device == "cpu" and settings.precision != "float32":
             raise PreparationError("CPU 번역은 float32를 선택하세요. 이 PC에서는 CUDA / 4bit를 권장합니다.")
@@ -140,9 +140,11 @@ class TranslationPreflight:
                 raise PreparationError("CUDA GPU를 사용할 수 없습니다. GPU 드라이버 및 CUDA PyTorch 설치를 확인하세요.")
             if settings.precision == "4bit":
                 import bitsandbytes  # noqa: F401 -- verify native library import
-            required = {"4bit": 8, "float16": 27, "float32": 54}[settings.precision]
+            required = {"4bit": 8, "bfloat16": 27, "float16": 27, "float32": 54}[settings.precision]
             free, _ = torch.cuda.mem_get_info()
             if free < required * 1024**3:
                 raise PreparationError(f"GPU 여유 메모리가 부족합니다. {settings.precision} 모드는 약 {required}GB 이상이 필요하며 현재 {free / 1024**3:.1f}GB입니다. 다른 GPU 프로그램을 종료하거나 4bit를 선택하세요.")
+            if settings.precision != "float32" and not torch.cuda.is_bf16_supported():
+                raise PreparationError("TranslateGemma CUDA 실행에는 BF16 지원 GPU가 필요합니다. GPU와 PyTorch 설정을 확인하세요.")
         elif psutil.virtual_memory().available < 56 * 1024**3:
             raise PreparationError("TranslateGemma 12B CPU/float32 실행에는 약 56GB 이상의 여유 RAM이 필요합니다. CUDA / 4bit를 선택하세요.")

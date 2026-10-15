@@ -8,7 +8,7 @@ from app.models import TranslationJob
 from app.repositories.job_repository import JobRepository
 from app.repositories.settings_repository import write_json
 from app.services.audio_processor import AudioProcessor
-from app.services.translategemma_translator import TranslateGemmaTranslator
+from app.services.translategemma_translator import TranslateGemmaTranslator, TranslationEngineError
 from app.services.whisper_transcriber import WhisperTranscriber
 from app.services.youtube_downloader import YouTubeDownloader
 
@@ -92,6 +92,7 @@ class TranslationPipeline:
                 publish()
                 try:
                     self.translator.load(settings, token, report)
+                    consecutive_failures = 0
                     for index, segment in enumerate(job.segments):
                         token.check()
                         if segment.status == "완료":
@@ -100,14 +101,22 @@ class TranslationPipeline:
                             segment.translated = self.translator.translate(segment.original, job.language,
                                                                           settings.target_language, token)
                             segment.status, segment.error = "완료", ""
+                            consecutive_failures = 0
                         except CancelledError:
                             raise
                         except Exception as exc:
                             segment.status, segment.error = "실패", str(exc)
+                            if isinstance(exc, TranslationEngineError):
+                                publish()
+                                raise
+                            consecutive_failures += 1
                             # OOM affects all remaining segments; preserve progress and return control.
                             if "out of memory" in str(exc).lower():
                                 publish()
                                 raise RuntimeError("GPU 메모리가 부족합니다. 다른 GPU 프로그램을 닫고 4bit 모드로 재시도하세요.") from exc
+                            if consecutive_failures >= 3:
+                                publish()
+                                raise RuntimeError("번역이 연속 3개 구간에서 실패하여 중단했습니다. 원인을 확인한 뒤 미완료 구간을 재시도하세요.\n" + str(exc)) from exc
                         report(f"번역 {index + 1}/{len(job.segments)}", int((index + 1) / len(job.segments) * 100))
                         publish()
                 finally:

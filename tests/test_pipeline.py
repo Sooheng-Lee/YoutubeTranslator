@@ -89,3 +89,42 @@ def test_cancel_during_translation_preserves_stt(tmp_path):
     job = repository.load(snapshots[-1]["id"])
     assert job.status == "취소" and job.stt_complete
     assert len(job.segments) == 2
+
+
+def test_engine_error_stops_remaining_segments_and_preserves_stt(tmp_path):
+    from app.services.translategemma_translator import TranslationEngineError
+
+    class BrokenTranslator(Translator):
+        def translate(self, text, *args):
+            self.calls.append(text)
+            raise TranslationEngineError("fixture NaN")
+
+    repository = JobRepository(tmp_path)
+    translator = BrokenTranslator()
+    pipeline = TranslationPipeline(repository, Downloader(), Audio(), STT(), translator)
+    snapshots = []
+    with pytest.raises(TranslationEngineError, match="NaN"):
+        pipeline.run(AppSettings(), CancellationToken(), lambda *args: None, lambda job: snapshots.append(job.to_dict()))
+    job = repository.load(snapshots[-1]["id"])
+    assert job.stt_complete and job.status == "실패"
+    assert translator.calls == ["hello"]
+    assert job.segments[0].status == "실패" and job.segments[1].status == "대기"
+
+
+def test_three_consecutive_failures_stop_without_processing_every_segment(tmp_path):
+    class LongerSTT(STT):
+        def transcribe(self, path, settings, token, report, callback):
+            for i in range(5):
+                callback(SubtitleSegment(i + 1, i, i + 1, f"segment {i}"))
+            return "en"
+
+    class BrokenTranslator(Translator):
+        def translate(self, text, *args):
+            self.calls.append(text)
+            raise ValueError("fixture decoding failure")
+
+    translator = BrokenTranslator()
+    pipeline = TranslationPipeline(JobRepository(tmp_path), Downloader(), Audio(), LongerSTT(), translator)
+    with pytest.raises(RuntimeError, match="연속 3개"):
+        pipeline.run(AppSettings(), CancellationToken(), lambda *args: None, lambda *args: None)
+    assert len(translator.calls) == 3

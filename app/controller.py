@@ -120,6 +120,9 @@ class AppController(QObject):
             self.update_job(result)
             failed = sum(s.status != "완료" for s in result.segments)
             self.last_message = f"{result.status} · {len(result.segments)}개 구간 · 미완료 {failed}개"
+            error = next((s.error for s in result.segments if s.error), "")
+            if error:
+                self.last_message += f" · 실패 원인: {error}"
             if result.video_path:
                 self.last_message += f" · 영상: {result.video_path}"
         else:

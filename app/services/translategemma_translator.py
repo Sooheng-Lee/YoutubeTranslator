@@ -5,6 +5,10 @@ import re
 from app.models import MODEL_ID
 
 
+class TranslationEngineError(RuntimeError):
+    """An engine-wide error for which retrying every subtitle is not useful."""
+
+
 class TranslateGemmaTranslator:
     def __init__(self, access_token=None):
         self.model = None
@@ -34,11 +38,13 @@ class TranslateGemmaTranslator:
             raise ValueError("CPU 실행은 float32를 선택하세요. 12B 모델은 많은 시스템 RAM을 사용합니다.")
         kwargs = {"low_cpu_mem_usage": True, "dtype": torch.float32}
         if settings.device == "cuda":
-            kwargs.update(device_map={"": 0}, dtype=torch.float32 if settings.precision == "float32" else torch.float16)
+            compute_dtype = self._cuda_dtype(settings.precision, torch)
+            kwargs.update(device_map={"": 0}, dtype=compute_dtype)
             if settings.precision == "4bit":
                 kwargs["quantization_config"] = BitsAndBytesConfig(
                     load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
-                    bnb_4bit_compute_dtype=torch.float16)
+                    bnb_4bit_compute_dtype=compute_dtype)
+            report(f"TranslateGemma 실행: {settings.precision} / 계산 {compute_dtype}", -1)
         if model_path == MODEL_ID:
             from app.services.llm_model_downloader import LLMModelDownloader
             model_path = str(LLMModelDownloader().download(model_path, self.access_token, token, report))
@@ -48,6 +54,23 @@ class TranslateGemmaTranslator:
         self.model = AutoModelForImageTextToText.from_pretrained(model_path, **kwargs)
         self.model.eval()
         token.check()
+
+    @staticmethod
+    def _cuda_dtype(precision, torch):
+        if precision == "float32":
+            return torch.float32
+        # Gemma 3's BF16 weights/activations can overflow in FP16, including NF4
+        # models whose remaining layers and quantized matmuls still use FP16.
+        if not torch.cuda.is_bf16_supported():
+            raise TranslationEngineError("TranslateGemma의 안정적인 CUDA 실행에는 BF16 지원 GPU가 필요합니다. 실행 장치와 모델 환경을 확인하세요.")
+        return torch.bfloat16
+
+    @staticmethod
+    def _validate_logits(scores):
+        import torch
+        if torch.isnan(scores).any() or torch.isposinf(scores).any() or not torch.isfinite(scores).any(dim=-1).all():
+            raise TranslationEngineError("번역 모델 계산에서 NaN/Inf가 발생했습니다. 앱을 재시작하여 4bit/BF16 설정으로 재시도하세요.")
+        return scores
 
     def _messages(self, text, source, target):
         return [{"role": "user", "content": [{"type": "text", "source_lang_code": source,
@@ -91,7 +114,11 @@ class TranslateGemmaTranslator:
 
     def translate(self, text, source, target, token):
         import torch
-        from transformers import StoppingCriteria, StoppingCriteriaList
+        from transformers import LogitsProcessor, LogitsProcessorList, StoppingCriteria, StoppingCriteriaList
+
+        class ValidateLogits(LogitsProcessor):
+            def __call__(self, input_ids, scores):
+                return TranslateGemmaTranslator._validate_logits(scores)
 
         class StopOnCancel(StoppingCriteria):
             def __call__(self, input_ids, scores, **kwargs):
@@ -105,6 +132,8 @@ class TranslateGemmaTranslator:
             with torch.inference_mode():
                 generated = self.model.generate(**inputs, max_new_tokens=1024, do_sample=False,
                                                 pad_token_id=self._pad_token_id(),
+                                                top_k=None, top_p=None,
+                                                logits_processor=LogitsProcessorList([ValidateLogits()]),
                                                 stopping_criteria=StoppingCriteriaList([StopOnCancel()]))
             token.check()
             ids = generated[0][length:]
