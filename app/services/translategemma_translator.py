@@ -69,6 +69,26 @@ class TranslateGemmaTranslator:
         cut = min(usable, key=lambda n: abs(n - midpoint)) if usable else midpoint
         return self.split(text[:cut], source, target) + self.split(text[cut:], source, target)
 
+    def _pad_token_id(self):
+        generation = self.model.generation_config
+        if generation.pad_token_id is not None:
+            return generation.pad_token_id
+        tokenizer = getattr(self.processor, "tokenizer", self.processor)
+        pad = getattr(tokenizer, "pad_token_id", None)
+        if pad is not None:
+            return pad
+        config = getattr(self.model, "config", None)
+        for candidate in (config, getattr(config, "text_config", None)):
+            pad = getattr(candidate, "pad_token_id", None)
+            if pad is not None:
+                return pad
+        eos = generation.eos_token_id
+        if isinstance(eos, (list, tuple)):
+            eos = eos[0] if eos else None
+        if eos is None:
+            raise ValueError("모델의 PAD/EOS 토큰 설정이 없습니다.")
+        return eos
+
     def translate(self, text, source, target, token):
         import torch
         from transformers import StoppingCriteria, StoppingCriteriaList
@@ -84,6 +104,7 @@ class TranslateGemmaTranslator:
             length = inputs["input_ids"].shape[-1]
             with torch.inference_mode():
                 generated = self.model.generate(**inputs, max_new_tokens=1024, do_sample=False,
+                                                pad_token_id=self._pad_token_id(),
                                                 stopping_criteria=StoppingCriteriaList([StopOnCancel()]))
             token.check()
             ids = generated[0][length:]
