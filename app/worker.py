@@ -1,6 +1,7 @@
 from copy import deepcopy
 from pathlib import Path
 import tempfile
+import re
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
@@ -8,6 +9,9 @@ from app.cancellation import CancelledError, CancellationToken
 from app.pipeline import TranslationPipeline
 from app.services.subtitle_exporter import SubtitleExporter
 from app.services.youtube_downloader import YouTubeDownloader
+from app.services.preflight import TranslationPreflight, PreparationError
+from app.services.llm_model_downloader import LLMModelDownloader
+from app.models import DownloadResult
 
 
 class PipelineWorker(QObject):
@@ -17,18 +21,31 @@ class PipelineWorker(QObject):
     error = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, action, settings, extra=None):
+    def __init__(self, action, settings, extra=None, access_token=None):
         super().__init__()
         self.action, self.settings, self.extra = action, settings, extra or {}
         self.token = CancellationToken()
+        self.access_token = access_token or None
 
     @pyqtSlot()
     def run(self):
         try:
-            downloader = YouTubeDownloader()
             report = self.progress.emit
             if self.action == "translate":
-                result = TranslationPipeline(downloader=downloader).run(
+                try:
+                    TranslationPreflight().check(self.settings, self.access_token, self.token, report)
+                except PreparationError as exc:
+                    raise PreparationError("번역 준비가 완료되지 않았습니다.\n\n" + str(exc)) from exc
+                except CancelledError:
+                    raise
+                except Exception as exc:
+                    raise PreparationError("번역 준비가 완료되지 않았습니다.\n실행 모듈 또는 장치 초기화에 실패했습니다. setup.bat과 check_environment.py로 환경을 확인하세요.\n\n" + str(exc)) from exc
+            downloader = None if self.action == "model" else YouTubeDownloader()
+            if self.action == "model":
+                path = LLMModelDownloader().download(self.settings.model_path, self.access_token, self.token, report)
+                result = DownloadResult(kind="llm", path=str(path), source=self.settings.model_path)
+            elif self.action == "translate":
+                result = TranslationPipeline(downloader=downloader, access_token=self.access_token).run(
                     self.settings, self.token, report,
                     lambda job: self.job_updated.emit(deepcopy(job)))
             elif self.action == "inspect":
@@ -51,8 +68,12 @@ class PipelineWorker(QObject):
             self.error.emit(str(exc))
         except Exception as exc:
             message = str(exc)
+            if self.access_token:
+                message = message.replace(self.access_token, "[토큰 숨김]")
+            message = re.sub(r"hf_[A-Za-z0-9]+", "[토큰 숨김]", message)
             if "gated" in message.lower() or "401" in message or "403" in message:
-                message = "모델 또는 영상 접근이 거부되었습니다. TranslateGemma 모델 페이지에서 이용 조건에 동의한 뒤 login_huggingface.bat으로 로그인하세요.\n\n" + message
+                message = "모델 또는 영상 접근이 거부되었습니다. TranslateGemma 모델 이용 조건에 동의하고 Access 토큰의 읽기 권한을 확인하세요. 토큰 입력 또는 login_huggingface.bat 로그인을 사용할 수 있습니다.\n\n" + message
             self.error.emit(message[-2500:])
         finally:
+            self.access_token = None
             self.finished.emit()

@@ -4,7 +4,7 @@ from PyQt6.QtCore import QObject, QThread, QTimer, QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
-from app.models import TranslationJob, VideoMetadata
+from app.models import DownloadResult, TranslationJob, VideoMetadata
 from app.repositories.job_repository import JobRepository
 from app.repositories.settings_repository import SettingsRepository
 from app.services.subtitle_exporter import SubtitleExporter
@@ -28,6 +28,7 @@ class AppController(QObject):
         window.retry_button.clicked.connect(lambda: self.start("translate"))
         window.inspect_button.clicked.connect(lambda: self.start("inspect"))
         window.video_button.clicked.connect(lambda: self.start("video"))
+        window.model_download_button.clicked.connect(lambda: self.start("model"))
         window.cancel_button.clicked.connect(self.cancel)
         window.original_button.clicked.connect(lambda: self.export("original"))
         window.translated_button.clicked.connect(lambda: self.export("translated"))
@@ -45,24 +46,19 @@ class AppController(QObject):
             return
         settings = self.window.settings()
         try:
-            YouTubeDownloader.validate_url(settings.url)
-            if not settings.output_dir:
-                raise ValueError("저장 폴더를 지정하세요.")
-            output = Path(settings.output_dir)
-            output.mkdir(parents=True, exist_ok=True)
-            # Check write access using a unique, disposable file.
-            import tempfile
-            with tempfile.TemporaryFile(dir=output):
-                pass
-            if action == "translate":
-                if settings.device == "cpu":
-                    if settings.precision != "float32":
-                        raise ValueError("CPU 번역은 float32를 선택하세요.")
-                    import psutil
-                    if psutil.virtual_memory().available < 56 * 1024**3:
-                        raise ValueError("TranslateGemma 12B float32 CPU 실행에는 약 56GB 이상의 여유 RAM이 필요합니다. 이 PC에서는 CUDA / 4bit를 사용하세요.")
+            if action != "model":
+                YouTubeDownloader.validate_url(settings.url)
+                if not settings.output_dir:
+                    raise ValueError("저장 폴더를 지정하세요.")
+                output = Path(settings.output_dir)
+                output.mkdir(parents=True, exist_ok=True)
+                # Check write access using a unique, disposable file.
+                import tempfile
+                with tempfile.TemporaryFile(dir=output):
+                    pass
+            if action in {"translate", "model"}:
                 if not settings.model_path:
-                    raise ValueError("TranslateGemma 12B 모델을 지정하세요.")
+                    raise ValueError("LLM ID Path에 모델 ID 또는 로컬 경로를 입력하세요.")
             self.settings_repository.save(settings)
         except Exception as exc:
             self.alert(str(exc))
@@ -71,8 +67,11 @@ class AppController(QObject):
         self.window.status.setText("준비 중")
         self.window.progress.setRange(0, 0)
         self.last_message = "작업 종료"
+        self.active_action = action
+        self.task_succeeded = False
         self.active_url = settings.url
-        self.worker = PipelineWorker(action, settings, extra)
+        self.worker = PipelineWorker(action, settings, extra,
+                                     access_token=self.window.access_token.text().strip())
         self.thread = QThread(self)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
@@ -97,7 +96,11 @@ class AppController(QObject):
         self.window.show_job(job)
 
     def on_result(self, result):
-        if isinstance(result, VideoMetadata):
+        self.task_succeeded = True
+        if isinstance(result, DownloadResult) and result.kind == "llm":
+            self.last_message = f"LLM 모델 다운로드 완료: {result.path}"
+            self.window.info.setText(self.last_message)
+        elif isinstance(result, VideoMetadata):
             self.metadata = result
             self.inspected_url = self.active_url
             heights = ", ".join(f"{h}p" for h in result.heights) or "확인 불가"
@@ -132,7 +135,7 @@ class AppController(QObject):
         self.worker = None
         self.window.set_busy(False)
         self.window.progress.setRange(0, 100)
-        self.window.progress.setValue(0)
+        self.window.progress.setValue(100 if self.active_action == "model" and self.task_succeeded else 0)
         self.window.status.setText(self.last_message)
         if self.closing:
             QTimer.singleShot(0, self.window.close)
@@ -141,7 +144,7 @@ class AppController(QObject):
         if self.worker:
             self.worker.token.cancel()
             self.window.cancel_button.setEnabled(False)
-            self.window.status.setText("취소 요청됨 · 현재 모델 로딩/추론의 안전한 중단 지점을 기다립니다.")
+            self.window.status.setText("취소 요청됨 · 현재 파일 다운로드/모델 연산이 끝나면 중단합니다. 완료 파일은 재사용됩니다.")
 
     def edit_translation(self, item):
         if self.thread is not None or not self.job or item.column() != 4:

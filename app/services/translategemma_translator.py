@@ -3,13 +3,13 @@ from pathlib import Path
 import re
 
 from app.models import MODEL_ID
-from app.repositories.settings_repository import data_directory
 
 
 class TranslateGemmaTranslator:
-    def __init__(self):
+    def __init__(self, access_token=None):
         self.model = None
         self.processor = None
+        self.access_token = access_token or None
 
     def load(self, settings, token, report):
         import av  # noqa: F401 -- initialize FFmpeg DLLs before torch on Windows
@@ -18,6 +18,7 @@ class TranslateGemmaTranslator:
         token.check()
         model_path = settings.model_path.strip()
         if model_path != MODEL_ID:
+            model_path = str(Path(model_path).expanduser())
             from transformers import AutoConfig
             if not Path(model_path).is_dir():
                 raise ValueError("TranslateGemma 12B ID 또는 해당 모델의 로컬 폴더를 지정하세요.")
@@ -39,10 +40,8 @@ class TranslateGemmaTranslator:
                     load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
                     bnb_4bit_compute_dtype=torch.float16)
         if model_path == MODEL_ID:
-            from huggingface_hub import snapshot_download
-            # local_dir avoids symlink privileges and first-download races on Windows.
-            model_path = snapshot_download(MODEL_ID, local_dir=str(data_directory() / "models" / "translategemma-12b-it"),
-                                           allow_patterns=["*.json", "*.safetensors", "*.model", "*.jinja", "*.txt"])
+            from app.services.llm_model_downloader import LLMModelDownloader
+            model_path = str(LLMModelDownloader().download(model_path, self.access_token, token, report))
         token.check()
         self.processor = AutoProcessor.from_pretrained(model_path)
         token.check()

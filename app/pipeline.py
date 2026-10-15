@@ -18,19 +18,19 @@ def fingerprint(data):
 
 
 class TranslationPipeline:
-    def __init__(self, repository=None, downloader=None, audio=None, transcriber=None, translator=None):
+    def __init__(self, repository=None, downloader=None, audio=None, transcriber=None, translator=None, access_token=None):
         self.repository = repository or JobRepository()
         self.downloader = downloader or YouTubeDownloader()
         self.audio = audio or AudioProcessor()
         self.transcriber = transcriber or WhisperTranscriber()
-        self.translator = translator or TranslateGemmaTranslator()
+        self.translator = translator or TranslateGemmaTranslator(access_token=access_token)
 
     def run(self, settings, token, report, on_job):
         from app.models import SubtitleSegment
         metadata = self.downloader.inspect(settings.url, token, report)
         stt_key = fingerprint({"video": metadata.id, "model": settings.whisper_model,
                                "source": settings.source_language, "vad": True, "sample_rate": 16000,
-                               "version": 1})
+                               "device_policy": "cuda-auto-fallback-cpu", "version": 2})
         job_id = fingerprint({"stt": stt_key, "target": settings.target_language,
                               "llm": settings.model_path, "precision": settings.precision, "version": 1})
         job = self.repository.load(job_id)
